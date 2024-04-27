@@ -133,49 +133,7 @@ export class LoginComponent implements OnInit {
      // const boolFlagValue = client.variation('available', false) as boolean;
       // etc.
     });
-    // this.userService.login(this.user).subscribe((authentication: any) => {
-    //   localStorage.setItem('token', authentication.token)
-    //   const expires = new Date();
-    //   expires.setHours(expires.getHours() + 8)
-    //   this.cookieService.put('token', authentication.token, { expires })
-    //   sessionStorage.setItem('bid', authentication.bid)
-    //   this.basketService.updateNumberOfCartItems()
-    //   this.userService.isLoggedIn.next(true)
-    //   this.ngZone.run(async () => await this.router.navigate(['/search']))
-    // }, ({ error }) => {
-    //   if (error.status && error.data && error.status === 'totp_token_required') {
-    //     localStorage.setItem('totp_tmp_token', error.data.tmpToken)
-    //     this.ngZone.run(async () => await this.router.navigate(['/2fa/enter']))
-    //     return
-    //   }
-    //   localStorage.removeItem('token')
-    //   this.cookieService.remove('token')
-    //   sessionStorage.removeItem('bid')
-    //   this.error = error
-    //   this.userService.isLoggedIn.next(false)
-    //   this.emailControl.markAsPristine()
-    //   this.passwordControl.markAsPristine()
-    // })
-
-    // if (this.rememberMe.value) {
-    //   localStorage.setItem('email', this.user.email)
-    // } else {
-    //   const test =  client.variation('remember-me-1', false);
-    //   console.log(client.getContext());
-    //   console.log(test);
-    //   if(client.variation('remember-me-1', false)){
-    //     if(window.confirm("Would you like us to remember you?")){
-    //       window.alert("You have been Remembered!");
-    //     }
-    //     else {
-    //       localStorage.removeItem('email')
-    //     }
-    //   }
-    //   else {
-    //     localStorage.removeItem('email')
-    //   }
-      
-    // }
+   
   }
 
   loginService(){
