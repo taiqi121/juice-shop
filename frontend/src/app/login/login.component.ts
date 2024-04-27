@@ -16,6 +16,15 @@ import { FormSubmitService } from '../Services/form-submit.service'
 import { ConfigurationService } from '../Services/configuration.service'
 import { BasketService } from '../Services/basket.service'
 
+import * as LDClient from 'launchdarkly-js-client-sdk'
+import { runInNewContext } from 'vm'
+
+const context: LDClient.LDContext = {
+  kind: 'jon-pc',
+  key: 'jon@test.com'
+};
+const client: LDClient.LDClient = LDClient.initialize('6626bd4f61c9bf0fcdcde445', context);
+
 library.add(faKey, faEye, faEyeSlash, faGoogle)
 
 const oauthProviderUrl = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -73,35 +82,104 @@ export class LoginComponent implements OnInit {
     this.user = {}
     this.user.email = this.emailControl.value
     this.user.password = this.passwordControl.value
-    this.userService.login(this.user).subscribe((authentication: any) => {
-      localStorage.setItem('token', authentication.token)
-      const expires = new Date()
-      expires.setHours(expires.getHours() + 8)
-      this.cookieService.put('token', authentication.token, { expires })
-      sessionStorage.setItem('bid', authentication.bid)
-      this.basketService.updateNumberOfCartItems()
-      this.userService.isLoggedIn.next(true)
-      this.ngZone.run(async () => await this.router.navigate(['/search']))
-    }, ({ error }) => {
-      if (error.status && error.data && error.status === 'totp_token_required') {
-        localStorage.setItem('totp_tmp_token', error.data.tmpToken)
-        this.ngZone.run(async () => await this.router.navigate(['/2fa/enter']))
-        return
+    const newContext: LDClient.LDContext = {
+      kind: 'jon-pc',
+      key: this.user.email
+    }; 
+    client.identify(newContext, "new context Added", () => {
+      this.userService.login(this.user).subscribe((authentication: any) => {
+        localStorage.setItem('token', authentication.token)
+        const expires = new Date();
+        expires.setHours(expires.getHours() + 8)
+        this.cookieService.put('token', authentication.token, { expires })
+        sessionStorage.setItem('bid', authentication.bid)
+        this.basketService.updateNumberOfCartItems()
+        this.userService.isLoggedIn.next(true)
+        this.ngZone.run(async () => await this.router.navigate(['/search']))
+      }, ({ error }) => {
+        if (error.status && error.data && error.status === 'totp_token_required') {
+          localStorage.setItem('totp_tmp_token', error.data.tmpToken)
+          this.ngZone.run(async () => await this.router.navigate(['/2fa/enter']))
+          return
+        }
+        localStorage.removeItem('token')
+        this.cookieService.remove('token')
+        sessionStorage.removeItem('bid')
+        this.error = error
+        this.userService.isLoggedIn.next(false)
+        this.emailControl.markAsPristine()
+        this.passwordControl.markAsPristine()
+      })
+  
+      if (this.rememberMe.value) {
+        localStorage.setItem('email', this.user.email)
+      } else {
+        if(client.variation('remember-me-1', false)){
+          if(window.confirm("Would you like us to remember you?")){
+            window.alert("You have been Remembered!");
+          }
+          else {
+            localStorage.removeItem('email')
+          }
+        }
+        else {
+          localStorage.removeItem('email')
+        }
+        
       }
-      localStorage.removeItem('token')
-      this.cookieService.remove('token')
-      sessionStorage.removeItem('bid')
-      this.error = error
-      this.userService.isLoggedIn.next(false)
-      this.emailControl.markAsPristine()
-      this.passwordControl.markAsPristine()
-    })
+    });
+    client.on('ready', () => {
+      // initialization succeeded, flag values are now available
+     // const boolFlagValue = client.variation('available', false) as boolean;
+      // etc.
+    });
+    // this.userService.login(this.user).subscribe((authentication: any) => {
+    //   localStorage.setItem('token', authentication.token)
+    //   const expires = new Date();
+    //   expires.setHours(expires.getHours() + 8)
+    //   this.cookieService.put('token', authentication.token, { expires })
+    //   sessionStorage.setItem('bid', authentication.bid)
+    //   this.basketService.updateNumberOfCartItems()
+    //   this.userService.isLoggedIn.next(true)
+    //   this.ngZone.run(async () => await this.router.navigate(['/search']))
+    // }, ({ error }) => {
+    //   if (error.status && error.data && error.status === 'totp_token_required') {
+    //     localStorage.setItem('totp_tmp_token', error.data.tmpToken)
+    //     this.ngZone.run(async () => await this.router.navigate(['/2fa/enter']))
+    //     return
+    //   }
+    //   localStorage.removeItem('token')
+    //   this.cookieService.remove('token')
+    //   sessionStorage.removeItem('bid')
+    //   this.error = error
+    //   this.userService.isLoggedIn.next(false)
+    //   this.emailControl.markAsPristine()
+    //   this.passwordControl.markAsPristine()
+    // })
 
-    if (this.rememberMe.value) {
-      localStorage.setItem('email', this.user.email)
-    } else {
-      localStorage.removeItem('email')
-    }
+    // if (this.rememberMe.value) {
+    //   localStorage.setItem('email', this.user.email)
+    // } else {
+    //   const test =  client.variation('remember-me-1', false);
+    //   console.log(client.getContext());
+    //   console.log(test);
+    //   if(client.variation('remember-me-1', false)){
+    //     if(window.confirm("Would you like us to remember you?")){
+    //       window.alert("You have been Remembered!");
+    //     }
+    //     else {
+    //       localStorage.removeItem('email')
+    //     }
+    //   }
+    //   else {
+    //     localStorage.removeItem('email')
+    //   }
+      
+    // }
+  }
+
+  loginService(){
+    
   }
 
   googleLogin () {
