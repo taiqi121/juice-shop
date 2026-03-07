@@ -33,7 +33,12 @@ module.exports = function getUserProfile () {
               if (!code) {
                 throw new Error('Username is null')
               }
-              username = eval(code) // eslint-disable-line no-eval
+              // Safe validation instead of eval - validate the code is a safe expression
+              if (!/^[a-zA-Z0-9_.*+\-/()[\]{}'":\s]+$/.test(code)) {
+                throw new Error('Invalid username format')
+              }
+              // Use JSON.parse for safe data validation, not code execution
+              username = JSON.stringify(code)
             } catch (err) {
               username = '\\' + username
             }

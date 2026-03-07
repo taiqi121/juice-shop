@@ -17,19 +17,41 @@ module.exports = function b2bOrder () {
     if (!utils.disableOnContainerEnv()) {
       const orderLinesData = body.orderLinesData || ''
       try {
-        const sandbox = { safeEval, orderLinesData }
-        vm.createContext(sandbox)
-        vm.runInContext('safeEval(orderLinesData)', sandbox, { timeout: 2000 })
+        // Safe validation of orderLinesData - must be valid JSON array
+        if (typeof orderLinesData !== 'string') {
+          throw new Error('orderLinesData must be a string')
+        }
+        
+        // Validate JSON structure without code execution
+        let parsedData
+        try {
+          parsedData = JSON.parse(orderLinesData)
+        } catch {
+          throw new Error('orderLinesData must be valid JSON')
+        }
+        
+        // Validate array of order lines
+        if (!Array.isArray(parsedData)) {
+          throw new Error('orderLinesData must be an array')
+        }
+        
+        // Validate each order line
+        for (const line of parsedData) {
+          if (typeof line !== 'object' || line === null) {
+            throw new Error('Each order line must be an object')
+          }
+          if (typeof line.quantity !== 'number' || line.quantity < 1) {
+            throw new Error('Invalid quantity in order line')
+          }
+          if (typeof line.productId !== 'number') {
+            throw new Error('Invalid productId in order line')
+          }
+        }
+        
+        // No code execution - just validate and return success
         res.json({ cid: body.cid, orderNo: uniqueOrderNumber(), paymentDue: dateTwoWeeksFromNow() })
       } catch (err) {
-        if (utils.getErrorMessage(err).match(/Script execution timed out.*/) != null) {
-          challengeUtils.solveIf(challenges.rceOccupyChallenge, () => { return true })
-          res.status(503)
-          next(new Error('Sorry, we are temporarily not available! Please try again later.'))
-        } else {
-          challengeUtils.solveIf(challenges.rceChallenge, () => { return utils.getErrorMessage(err) === 'Infinite loop detected - reached max iterations' })
-          next(err)
-        }
+        next(err)
       }
     } else {
       res.json({ cid: body.cid, orderNo: uniqueOrderNumber(), paymentDue: dateTwoWeeksFromNow() })
