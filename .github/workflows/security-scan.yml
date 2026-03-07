@@ -1,0 +1,390 @@
+name: "Scheduled Security Scan"
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight UTC
+  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  security-events: write
+  actions: read
+
+jobs:
+  dependency-audit:
+    name: "Dependency Vulnerability Audit"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Check out Git repository"
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac #v4.0.0
+
+      - name: "Use Node.js 20"
+        uses: actions/setup-node@5e21ff4d9bc1a8cf6de233a3057d20ec6b3fb69d #v3.8.1
+        with:
+          node-version: 20
+
+      - name: "Install dependencies"
+        run: npm install --ignore-scripts
+
+      - name: "Run npm audit and save report"
+        id: npm-audit
+        run: |
+          npm audit --json > /tmp/audit-report.json 2>/dev/null || true
+          CRITICAL=$(jq -r '.metadata.vulnerabilities.critical // 0' /tmp/audit-report.json)
+          HIGH=$(jq -r '.metadata.vulnerabilities.high // 0' /tmp/audit-report.json)
+          TOTAL=$(jq -r '.metadata.vulnerabilities.total // 0' /tmp/audit-report.json)
+          echo "critical_count=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high_count=$HIGH" >> $GITHUB_OUTPUT
+          echo "total_count=$TOTAL" >> $GITHUB_OUTPUT
+          echo "Vulnerabilities found - Critical: $CRITICAL, High: $HIGH, Total: $TOTAL"
+        continue-on-error: true
+
+      - name: "Ensure security labels exist"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = [
+              { name: 'security', color: 'e11d48', description: 'Security related issue' },
+              { name: 'vulnerability', color: 'dc2626', description: 'Vulnerability found in dependency or code' },
+              { name: 'critical', color: '7f1d1d', description: 'Critical severity vulnerability' },
+              { name: 'high', color: 'b91c1c', description: 'High severity vulnerability' },
+              { name: 'automated', color: '6b7280', description: 'Automatically created by a workflow' },
+              { name: 'dependencies', color: '0ea5e9', description: 'Dependency update or vulnerability' },
+            ];
+            for (const label of labels) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                });
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: label.name,
+                    color: label.color,
+                    description: label.description,
+                  });
+                  console.log(`Created label: ${label.name}`);
+                }
+              }
+            }
+
+      - name: "Create GitHub Issues for high and critical vulnerabilities"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let auditReport;
+            try {
+              auditReport = JSON.parse(fs.readFileSync('/tmp/audit-report.json', 'utf8'));
+            } catch (e) {
+              console.log('Could not parse audit report:', e.message);
+              return;
+            }
+
+            const vulnerabilities = auditReport.vulnerabilities || {};
+            const scanDate = new Date().toISOString();
+
+            for (const [pkgName, vuln] of Object.entries(vulnerabilities)) {
+              const severity = vuln.severity || 'unknown';
+              if (!['critical', 'high'].includes(severity)) continue;
+
+              const title = `[Security] ${severity.toUpperCase()} vulnerability in \`${pkgName}\``;
+
+              // Check for duplicate open issues to avoid spam
+              const existingIssues = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                labels: 'security,vulnerability',
+                per_page: 100,
+              });
+
+              const duplicate = existingIssues.data.some(issue => issue.title === title);
+              if (duplicate) {
+                console.log(`Skipping duplicate issue: ${title}`);
+                continue;
+              }
+
+              // Build advisory details from the 'via' field
+              const via = Array.isArray(vuln.via) ? vuln.via : [];
+              const advisoryLines = via
+                .filter(v => typeof v === 'object' && v !== null)
+                .map(v => {
+                  const cweList = Array.isArray(v.cwe) ? v.cwe.join(', ') : (v.cwe || 'N/A');
+                  return `- **${v.title || 'Advisory'}**\n  - Severity: \`${v.severity || 'unknown'}\`\n  - CWE: \`${cweList}\`\n  - URL: ${v.url || 'N/A'}`;
+                });
+
+              const fixInfo = vuln.fixAvailable === true
+                ? 'Run `npm audit fix` to automatically fix this vulnerability.'
+                : (vuln.fixAvailable && typeof vuln.fixAvailable === 'object'
+                  ? `Update \`${vuln.fixAvailable.name}\` to version \`${vuln.fixAvailable.version}\` (breaking change may be required — use \`npm audit fix --force\`).`
+                  : 'No automatic fix available. Manual review and update required.');
+
+              const body = [
+                `## Vulnerability Details`,
+                ``,
+                `| Field | Value |`,
+                `|-------|-------|`,
+                `| **Package** | \`${pkgName}\` |`,
+                `| **Severity** | \`${severity}\` |`,
+                `| **Affected Range** | \`${vuln.range || 'unknown'}\` |`,
+                `| **Fix Available** | ${vuln.fixAvailable ? '✅ Yes' : '❌ No'} |`,
+                ``,
+                advisoryLines.length > 0 ? `## Advisory Information\n\n${advisoryLines.join('\n\n')}` : '',
+                ``,
+                `## Remediation`,
+                ``,
+                fixInfo,
+                ``,
+                `---`,
+                `*This issue was automatically created by the [scheduled security scan](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/security-scan.yml).*`,
+                `*Scan date: ${scanDate}*`,
+              ].filter(l => l !== undefined).join('\n');
+
+              const issueLabels = ['security', 'vulnerability', severity];
+
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: issueLabels,
+              });
+              console.log(`Created issue #${created.data.number}: ${title}`);
+            }
+
+      - name: "Attempt to fix critical vulnerabilities"
+        id: fix-vulnerabilities
+        if: steps.npm-audit.outputs.critical_count > '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          npm audit fix --force 2>/dev/null || true
+          if ! git diff --quiet; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Changes detected after npm audit fix --force"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes after npm audit fix --force"
+          fi
+        continue-on-error: true
+
+      - name: "Create PR for critical vulnerability fixes"
+        if: steps.fix-vulnerabilities.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "fix(security): auto-fix critical dependency vulnerabilities via npm audit fix"
+          title: "[Security] Auto-fix critical dependency vulnerabilities"
+          body: |
+            ## Automated Security Fix
+
+            This PR was automatically created by the [scheduled security scan](https://github.com/${{ github.repository }}/actions/workflows/security-scan.yml) to address **critical** dependency vulnerabilities detected by `npm audit`.
+
+            ### Changes
+
+            Dependencies have been updated using `npm audit fix --force` to resolve critical security vulnerabilities.
+
+            ### ⚠️ Review Notes
+
+            - Please carefully review all dependency changes before merging
+            - Run the full test suite to ensure nothing is broken
+            - Verify that upgraded packages are compatible with the codebase
+            - `--force` was used, so breaking changes may have been introduced
+
+            ---
+            *This PR was automatically created by the scheduled security scan workflow.*
+            *Workflow run: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          branch: "security/auto-fix-critical-vulnerabilities"
+          delete-branch: true
+          labels: |
+            security
+            dependencies
+            automated
+
+  codeql-analysis:
+    name: "CodeQL Security Analysis"
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['javascript-typescript']
+    steps:
+      - name: "Check out Git repository"
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac #v4.0.0
+
+      - name: "Initialize CodeQL"
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - 'data/static/codefixes'
+
+      - name: "Autobuild"
+        uses: github/codeql-action/autobuild@v3
+
+      - name: "Perform CodeQL Analysis"
+        id: codeql
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: sarif-results
+
+      - name: "Upload SARIF results as artifact"
+        uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32 #v3.1.3
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results/
+          retention-days: 7
+
+      - name: "Create GitHub Issues for high-severity CodeQL findings"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const resultsDir = 'sarif-results';
+            if (!fs.existsSync(resultsDir)) {
+              console.log('No SARIF results directory found, skipping issue creation');
+              return;
+            }
+
+            const sarifFiles = fs.readdirSync(resultsDir).filter(f => f.endsWith('.sarif'));
+            if (sarifFiles.length === 0) {
+              console.log('No SARIF files found');
+              return;
+            }
+
+            const scanDate = new Date().toISOString();
+            // Ensure codeql label exists
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'codeql',
+              });
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'codeql',
+                  color: '8b5cf6',
+                  description: 'CodeQL security finding',
+                });
+              }
+            }
+
+            for (const sarifFile of sarifFiles) {
+              let sarif;
+              try {
+                sarif = JSON.parse(fs.readFileSync(path.join(resultsDir, sarifFile), 'utf8'));
+              } catch (e) {
+                console.log(`Could not parse ${sarifFile}:`, e.message);
+                continue;
+              }
+
+              for (const run of (sarif.runs || [])) {
+                const rules = {};
+                // Build a map of ruleId -> rule metadata
+                const extensions = (run.tool && run.tool.extensions) || [];
+                for (const ext of extensions) {
+                  for (const rule of (ext.rules || [])) {
+                    rules[rule.id] = rule;
+                  }
+                }
+                for (const rule of ((run.tool && run.tool.driver && run.tool.driver.rules) || [])) {
+                  rules[rule.id] = rule;
+                }
+
+                for (const result of (run.results || [])) {
+                  // Filter to error-level or high security-severity results only
+                  const level = result.level || 'warning';
+                  const ruleId = result.ruleId || 'unknown';
+                  const rule = rules[ruleId] || {};
+                  const secSeverity = rule.properties && rule.properties['security-severity'];
+                  // security-severity is a CVSS score string; >= 7.0 is high/critical
+                  const isHighSeverity = level === 'error' || (secSeverity && parseFloat(secSeverity) >= 7.0);
+                  if (!isHighSeverity) continue;
+
+                  const message = (result.message && result.message.text) || 'No description available';
+                  const locations = result.locations || [];
+                  const loc = locations[0];
+                  const filePath = loc && loc.physicalLocation &&
+                    loc.physicalLocation.artifactLocation &&
+                    loc.physicalLocation.artifactLocation.uri || 'unknown';
+                  const lineNumber = loc && loc.physicalLocation &&
+                    loc.physicalLocation.region &&
+                    loc.physicalLocation.region.startLine || 'unknown';
+
+                  const ruleDesc = rule.shortDescription && rule.shortDescription.text || ruleId;
+                  const title = `[Security] CodeQL: ${ruleDesc} in \`${filePath}\``;
+
+                  // Check for duplicate open issues
+                  const existingIssues = await github.rest.issues.listForRepo({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    state: 'open',
+                    labels: 'security,codeql',
+                    per_page: 100,
+                  });
+
+                  const duplicate = existingIssues.data.some(issue => issue.title === title);
+                  if (duplicate) {
+                    console.log(`Skipping duplicate issue: ${title}`);
+                    continue;
+                  }
+
+                  const helpUri = rule.helpUri || (result.hostedViewerUri) || '';
+                  const body = [
+                    `## CodeQL Security Finding`,
+                    ``,
+                    `| Field | Value |`,
+                    `|-------|-------|`,
+                    `| **Rule ID** | \`${ruleId}\` |`,
+                    `| **Rule** | ${ruleDesc} |`,
+                    `| **Level** | \`${level}\` |`,
+                    `| **File** | \`${filePath}\` |`,
+                    `| **Line** | \`${lineNumber}\` |`,
+                    secSeverity ? `| **CVSS Score** | \`${secSeverity}\` |` : '',
+                    helpUri ? `| **Reference** | [Documentation](${helpUri}) |` : '',
+                    ``,
+                    `## Description`,
+                    ``,
+                    message,
+                    ``,
+                    `## Remediation`,
+                    ``,
+                    `Review the code at \`${filePath}:${lineNumber}\` and address the identified vulnerability.`,
+                    helpUri ? `Refer to the [CodeQL documentation](${helpUri}) for guidance.` : '',
+                    ``,
+                    `---`,
+                    `*This issue was automatically created by the [scheduled security scan](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/security-scan.yml).*`,
+                    `*Scan date: ${scanDate}*`,
+                  ].filter(l => l !== '').join('\n');
+
+                  const created = await github.rest.issues.create({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    title,
+                    body,
+                    labels: ['security', 'codeql', 'bug'],
+                  });
+                  console.log(`Created issue #${created.data.number}: ${title}`);
+                }
+              }
+            }
