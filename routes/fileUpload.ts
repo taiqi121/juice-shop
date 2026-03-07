@@ -79,7 +79,7 @@ function handleXmlUpload ({ file }: Request, res: Response, next: NextFunction) 
         if (data.includes('<!ENTITY') || data.includes('SYSTEM')) {
           throw new Error('XML entities and external system references are not allowed')
         }
-        
+
         const sandbox = { libxml, data }
         vm.createContext(sandbox)
         const xmlDoc = vm.runInContext('libxml.parseXml(data, { noblanks: true, noent: false, nocdata: true })', sandbox, { timeout: 2000 })
