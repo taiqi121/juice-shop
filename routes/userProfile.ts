@@ -20,7 +20,7 @@ const entities = new Entities()
 module.exports = function getUserProfile () {
   return (req: Request, res: Response, next: NextFunction) => {
     fs.readFile('views/userProfile.pug', function (err, buf) {
-      if (err != null) throw err
+      if (err != null) { next(err); return }
       const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
       if (loggedInUser) {
         UserModel.findByPk(loggedInUser.data.id).then((user: UserModel | null) => {
