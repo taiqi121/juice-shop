@@ -1,6 +1,9 @@
 name: "Scheduled Security Scan"
 
 on:
+  push:
+    branches:
+      - 'copilot/scan-repo-for-vulnerabilities'
   schedule:
     - cron: '0 0 * * *'  # Daily at midnight UTC
   workflow_dispatch:  # Allow manual triggering
