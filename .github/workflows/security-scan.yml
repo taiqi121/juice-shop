@@ -2,7 +2,7 @@ name: "Scheduled Security Scan"
 
 on:
   schedule:
-    - cron: '0 1 * * *'  # Daily at 1am UTC – same schedule as OSS scan so both run together
+    - cron: '0 23 * * *'  # Daily at 5pm CST (23:00 UTC) – same schedule as OSS scan so both run together
   workflow_dispatch:  # Allow manual triggering from the Actions UI
 
 jobs:
