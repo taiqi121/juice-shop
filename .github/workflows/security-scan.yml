@@ -1,12 +1,9 @@
 name: "Scheduled Security Scan"
 
 on:
-  push:
-    branches:
-      - 'copilot/scan-repo-for-vulnerabilities'
   schedule:
-    - cron: '0 0 * * *'  # Daily at midnight UTC
-  workflow_dispatch:  # Allow manual triggering
+    - cron: '0 1 * * *'  # Daily at 1am UTC – same schedule as OSS scan so both run together
+  workflow_dispatch:  # Allow manual triggering from the Actions UI
 
 jobs:
   codeql-analysis:
@@ -51,8 +48,8 @@ jobs:
           path: sarif-results/
           retention-days: 7
 
-      - name: "Create GitHub Issues for high-severity CodeQL findings"
-        uses: actions/github-script@v7
+      - name: "Create GitHub Issues for top 5 critical CodeQL findings"
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b #v7.1.0
         with:
           script: |
             const fs = require('fs');
@@ -71,6 +68,7 @@ jobs:
             }
 
             const scanDate = new Date().toISOString();
+
             // Ensure codeql label exists
             try {
               await github.rest.issues.getLabel({
@@ -90,18 +88,20 @@ jobs:
               }
             }
 
+            // Collect all high-severity findings across all SARIF files
+            const allFindings = [];
             for (const sarifFile of sarifFiles) {
               let sarif;
               try {
                 sarif = JSON.parse(fs.readFileSync(path.join(resultsDir, sarifFile), 'utf8'));
               } catch (e) {
-                console.log(`Could not parse ${sarifFile}:`, e.message);
+                console.log(`Could not parse ${sarifFile}: ${e.message}`);
                 continue;
               }
 
               for (const run of (sarif.runs || [])) {
+                // Build ruleId -> rule metadata map
                 const rules = {};
-                // Build a map of ruleId -> rule metadata
                 const extensions = (run.tool && run.tool.extensions) || [];
                 for (const ext of extensions) {
                   for (const rule of (ext.rules || [])) {
@@ -113,79 +113,109 @@ jobs:
                 }
 
                 for (const result of (run.results || [])) {
-                  // Filter to error-level or high security-severity results only
                   const level = result.level || 'warning';
                   const ruleId = result.ruleId || 'unknown';
                   const rule = rules[ruleId] || {};
-                  const secSeverity = rule.properties && rule.properties['security-severity'];
+                  const secSeverityRaw = rule.properties && rule.properties['security-severity'];
                   // security-severity is a CVSS score string; >= 7.0 is high/critical
-                  const isHighSeverity = level === 'error' || (secSeverity && parseFloat(secSeverity) >= 7.0);
+                  const isHighSeverity = level === 'error' || (secSeverityRaw && parseFloat(secSeverityRaw) >= 7.0);
                   if (!isHighSeverity) continue;
 
+                  // Use explicit CVSS score when available; fall back to 9.0 for 'error'-level
+                  // findings (CodeQL's highest severity tier, equivalent to critical CVSS ≥ 9.0)
+                  // and 7.0 as the minimum threshold for other high-severity findings.
+                  const cvssScore = secSeverityRaw ? parseFloat(secSeverityRaw) : (level === 'error' ? 9.0 : 7.0);
                   const message = (result.message && result.message.text) || 'No description available';
-                  const locations = result.locations || [];
-                  const loc = locations[0];
-                  const filePath = loc && loc.physicalLocation &&
+                  const loc = (result.locations || [])[0];
+                  const filePath = (loc && loc.physicalLocation &&
                     loc.physicalLocation.artifactLocation &&
-                    loc.physicalLocation.artifactLocation.uri || 'unknown';
-                  const lineNumber = loc && loc.physicalLocation &&
+                    loc.physicalLocation.artifactLocation.uri) || 'unknown';
+                  const lineNumber = (loc && loc.physicalLocation &&
                     loc.physicalLocation.region &&
-                    loc.physicalLocation.region.startLine || 'unknown';
+                    loc.physicalLocation.region.startLine) || 'unknown';
+                  const ruleDesc = (rule.shortDescription && rule.shortDescription.text) || ruleId;
+                  const helpUri = rule.helpUri || result.hostedViewerUri || '';
 
-                  const ruleDesc = rule.shortDescription && rule.shortDescription.text || ruleId;
-                  const title = `[Security] CodeQL: ${ruleDesc} in \`${filePath}\``;
-
-                  // Check for duplicate open issues
-                  const existingIssues = await github.rest.issues.listForRepo({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    state: 'open',
-                    labels: 'security,codeql',
-                    per_page: 100,
-                  });
-
-                  const duplicate = existingIssues.data.some(issue => issue.title === title);
-                  if (duplicate) {
-                    console.log(`Skipping duplicate issue: ${title}`);
-                    continue;
-                  }
-
-                  const helpUri = rule.helpUri || (result.hostedViewerUri) || '';
-                  const body = [
-                    `## CodeQL Security Finding`,
-                    ``,
-                    `| Field | Value |`,
-                    `|-------|-------|`,
-                    `| **Rule ID** | \`${ruleId}\` |`,
-                    `| **Rule** | ${ruleDesc} |`,
-                    `| **Level** | \`${level}\` |`,
-                    `| **File** | \`${filePath}\` |`,
-                    `| **Line** | \`${lineNumber}\` |`,
-                    secSeverity ? `| **CVSS Score** | \`${secSeverity}\` |` : '',
-                    helpUri ? `| **Reference** | [Documentation](${helpUri}) |` : '',
-                    ``,
-                    `## Description`,
-                    ``,
-                    message,
-                    ``,
-                    `## Remediation`,
-                    ``,
-                    `Review the code at \`${filePath}:${lineNumber}\` and address the identified vulnerability.`,
-                    helpUri ? `Refer to the [CodeQL documentation](${helpUri}) for guidance.` : '',
-                    ``,
-                    `---`,
-                    `*This issue was automatically created by the [scheduled security scan](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/security-scan.yml).*`,
-                    `*Scan date: ${scanDate}*`,
-                  ].filter(l => l !== '').join('\n');
-
-                  const created = await github.rest.issues.create({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    title,
-                    body,
-                    labels: ['security', 'codeql', 'bug'],
-                  });
-                  console.log(`Created issue #${created.data.number}: ${title}`);
+                  allFindings.push({ ruleId, ruleDesc, level, cvssScore, filePath, lineNumber, message, helpUri });
                 }
               }
             }
+
+            if (allFindings.length === 0) {
+              console.log('No high-severity CodeQL findings. No issues to create.');
+              return;
+            }
+
+            // Sort by CVSS score descending (highest first)
+            allFindings.sort((a, b) => b.cvssScore - a.cvssScore);
+
+            // Deduplicate by ruleId+filePath, keep highest-score entry per unique location
+            const seen = new Set();
+            const top5 = [];
+            for (const f of allFindings) {
+              const key = `${f.ruleId}:${f.filePath}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                top5.push(f);
+                if (top5.length >= 5) break;
+              }
+            }
+
+            // Fetch existing open issues to avoid duplicates
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security,codeql',
+              per_page: 100,
+            });
+
+            let created = 0;
+            for (const f of top5) {
+              const title = `[Security] CodeQL: ${f.ruleDesc} in \`${f.filePath}\``;
+
+              const duplicate = existingIssues.data.some(issue => issue.title === title);
+              if (duplicate) {
+                console.log(`Skipping duplicate issue: ${title}`);
+                continue;
+              }
+
+              const body = [
+                `## CodeQL Security Finding`,
+                ``,
+                `| Field | Value |`,
+                `|-------|-------|`,
+                `| **Rule ID** | \`${f.ruleId}\` |`,
+                `| **Rule** | ${f.ruleDesc} |`,
+                `| **Level** | \`${f.level}\` |`,
+                `| **File** | \`${f.filePath}\` |`,
+                `| **Line** | \`${f.lineNumber}\` |`,
+                `| **CVSS Score** | \`${f.cvssScore}\` |`,
+                f.helpUri ? `| **Reference** | [Documentation](${f.helpUri}) |` : '',
+                ``,
+                `## Description`,
+                ``,
+                f.message,
+                ``,
+                `## Remediation`,
+                ``,
+                `Review the code at \`${f.filePath}:${f.lineNumber}\` and address the identified vulnerability.`,
+                f.helpUri ? `Refer to the [CodeQL documentation](${f.helpUri}) for guidance.` : '',
+                ``,
+                `---`,
+                `*This issue was automatically created by the [scheduled security scan](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/security-scan.yml).*`,
+                `*Scan date: ${scanDate}*`,
+              ].filter(l => l !== '').join('\n');
+
+              const result = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['security', 'codeql', 'bug'],
+              });
+              console.log(`Created issue #${result.data.number}: ${title}`);
+              created++;
+            }
+
+            console.log(`Done. Created ${created} new issue(s) for the top ${top5.length} CodeQL findings.`);
