@@ -22,8 +22,8 @@ import { runInNewContext } from 'vm'
 const context: LDClient.LDContext = {
   kind: 'jon-pc',
   key: 'jon@test.com'
-};
-const client: LDClient.LDClient = LDClient.initialize('6626bd4f61c9bf0fcdcde445', context);
+}
+const client: LDClient.LDClient = LDClient.initialize('6626bd4f61c9bf0fcdcde445', context)
 
 library.add(faKey, faEye, faEyeSlash, faGoogle)
 
@@ -85,11 +85,11 @@ export class LoginComponent implements OnInit {
     const newContext: LDClient.LDContext = {
       kind: 'jon-pc',
       key: this.user.email
-    }; 
-    client.identify(newContext, "new context Added", () => {
+    }
+    client.identify(newContext, 'new context Added', () => {
       this.userService.login(this.user).subscribe((authentication: any) => {
         localStorage.setItem('token', authentication.token)
-        const expires = new Date();
+        const expires = new Date()
         expires.setHours(expires.getHours() + 8)
         this.cookieService.put('token', authentication.token, { expires })
         sessionStorage.setItem('bid', authentication.bid)
@@ -110,34 +110,30 @@ export class LoginComponent implements OnInit {
         this.emailControl.markAsPristine()
         this.passwordControl.markAsPristine()
       })
-  
+
       if (this.rememberMe.value) {
         localStorage.setItem('email', this.user.email)
       } else {
-        if(client.variation('remember-me-1', false)){
-          if(window.confirm("Would you like us to remember you?")){
-            window.alert("You have been Remembered!");
-          }
-          else {
+        if (client.variation('remember-me-1', false)) {
+          if (window.confirm('Would you like us to remember you?')) {
+            window.alert('You have been Remembered!')
+          } else {
             localStorage.removeItem('email')
           }
-        }
-        else {
+        } else {
           localStorage.removeItem('email')
         }
-        
       }
-    });
+    })
     client.on('ready', () => {
       // initialization succeeded, flag values are now available
-     // const boolFlagValue = client.variation('available', false) as boolean;
+      // const boolFlagValue = client.variation('available', false) as boolean;
       // etc.
-    });
-   
+    })
   }
 
-  loginService(){
-    
+  loginService () {
+
   }
 
   googleLogin () {
