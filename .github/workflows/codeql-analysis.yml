@@ -2,7 +2,7 @@ name: "CodeQL Scan"
 
 on:
   schedule:
-    - cron: '0 23 * * *'  # Daily at 5pm CST (23:00 UTC) – same schedule as OSS and security scans
+    - cron: '0 6 * * *'  # Daily at midnight CST (06:00 UTC)
   workflow_dispatch:
 
 jobs:
