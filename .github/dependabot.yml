@@ -1,0 +1,45 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    target-branch: "develop"
+    reviewers:
+      - "bkimminich"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+    ignore:
+      # These packages are intentionally kept at vulnerable versions
+      # as part of the Juice Shop security training challenges
+      - dependency-name: "express-jwt"
+        versions: ["*"]
+      - dependency-name: "sanitize-html"
+        versions: ["*"]
+      - dependency-name: "unzipper"
+        versions: ["*"]
+      - dependency-name: "jsonwebtoken"
+        versions: ["*"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "daily"
+    target-branch: "develop"
+    reviewers:
+      - "bkimminich"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    target-branch: "develop"
+    reviewers:
+      - "bkimminich"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10

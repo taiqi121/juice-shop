@@ -1,0 +1,221 @@
+name: "Scheduled Security Scan"
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at midnight CST (06:00 UTC)
+  workflow_dispatch:  # Allow manual triggering from the Actions UI
+
+jobs:
+  codeql-analysis:
+    name: "CodeQL Security Analysis"
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['javascript-typescript']
+    steps:
+      - name: "Check out Git repository"
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac #v4.0.0
+
+      - name: "Initialize CodeQL"
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - 'data/static/codefixes'
+
+      - name: "Autobuild"
+        uses: github/codeql-action/autobuild@v3
+
+      - name: "Perform CodeQL Analysis"
+        id: codeql
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: sarif-results
+
+      - name: "Upload SARIF results as artifact"
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 #v4.6.2
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results/
+          retention-days: 7
+
+      - name: "Create GitHub Issues for top 5 critical CodeQL findings"
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b #v7.1.0
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const resultsDir = 'sarif-results';
+            if (!fs.existsSync(resultsDir)) {
+              console.log('No SARIF results directory found, skipping issue creation');
+              return;
+            }
+
+            const sarifFiles = fs.readdirSync(resultsDir).filter(f => f.endsWith('.sarif'));
+            if (sarifFiles.length === 0) {
+              console.log('No SARIF files found');
+              return;
+            }
+
+            const scanDate = new Date().toISOString();
+
+            // Ensure codeql label exists
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'codeql',
+              });
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'codeql',
+                  color: '8b5cf6',
+                  description: 'CodeQL security finding',
+                });
+              }
+            }
+
+            // Collect all high-severity findings across all SARIF files
+            const allFindings = [];
+            for (const sarifFile of sarifFiles) {
+              let sarif;
+              try {
+                sarif = JSON.parse(fs.readFileSync(path.join(resultsDir, sarifFile), 'utf8'));
+              } catch (e) {
+                console.log(`Could not parse ${sarifFile}: ${e.message}`);
+                continue;
+              }
+
+              for (const run of (sarif.runs || [])) {
+                // Build ruleId -> rule metadata map
+                const rules = {};
+                const extensions = (run.tool && run.tool.extensions) || [];
+                for (const ext of extensions) {
+                  for (const rule of (ext.rules || [])) {
+                    rules[rule.id] = rule;
+                  }
+                }
+                for (const rule of ((run.tool && run.tool.driver && run.tool.driver.rules) || [])) {
+                  rules[rule.id] = rule;
+                }
+
+                for (const result of (run.results || [])) {
+                  const level = result.level || 'warning';
+                  const ruleId = result.ruleId || 'unknown';
+                  const rule = rules[ruleId] || {};
+                  const secSeverityRaw = rule.properties && rule.properties['security-severity'];
+                  // security-severity is a CVSS score string; >= 7.0 is high/critical
+                  const isHighSeverity = level === 'error' || (secSeverityRaw && parseFloat(secSeverityRaw) >= 7.0);
+                  if (!isHighSeverity) continue;
+
+                  // Use explicit CVSS score when available; fall back to 9.0 for 'error'-level
+                  // findings (CodeQL's highest severity tier, equivalent to critical CVSS ≥ 9.0)
+                  // and 7.0 as the minimum threshold for other high-severity findings.
+                  const cvssScore = secSeverityRaw ? parseFloat(secSeverityRaw) : (level === 'error' ? 9.0 : 7.0);
+                  const message = (result.message && result.message.text) || 'No description available';
+                  const loc = (result.locations || [])[0];
+                  const filePath = (loc && loc.physicalLocation &&
+                    loc.physicalLocation.artifactLocation &&
+                    loc.physicalLocation.artifactLocation.uri) || 'unknown';
+                  const lineNumber = (loc && loc.physicalLocation &&
+                    loc.physicalLocation.region &&
+                    loc.physicalLocation.region.startLine) || 'unknown';
+                  const ruleDesc = (rule.shortDescription && rule.shortDescription.text) || ruleId;
+                  const helpUri = rule.helpUri || result.hostedViewerUri || '';
+
+                  allFindings.push({ ruleId, ruleDesc, level, cvssScore, filePath, lineNumber, message, helpUri });
+                }
+              }
+            }
+
+            if (allFindings.length === 0) {
+              console.log('No high-severity CodeQL findings. No issues to create.');
+              return;
+            }
+
+            // Sort by CVSS score descending (highest first)
+            allFindings.sort((a, b) => b.cvssScore - a.cvssScore);
+
+            // Deduplicate by ruleId+filePath, keep highest-score entry per unique location
+            const seen = new Set();
+            const top5 = [];
+            for (const f of allFindings) {
+              const key = `${f.ruleId}:${f.filePath}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                top5.push(f);
+                if (top5.length >= 5) break;
+              }
+            }
+
+            // Fetch existing open issues to avoid duplicates
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security,codeql',
+              per_page: 100,
+            });
+
+            let created = 0;
+            for (const f of top5) {
+              const title = `[Security] CodeQL: ${f.ruleDesc} in \`${f.filePath}\``;
+
+              const duplicate = existingIssues.data.some(issue => issue.title === title);
+              if (duplicate) {
+                console.log(`Skipping duplicate issue: ${title}`);
+                continue;
+              }
+
+              const body = [
+                `## CodeQL Security Finding`,
+                ``,
+                `| Field | Value |`,
+                `|-------|-------|`,
+                `| **Rule ID** | \`${f.ruleId}\` |`,
+                `| **Rule** | ${f.ruleDesc} |`,
+                `| **Level** | \`${f.level}\` |`,
+                `| **File** | \`${f.filePath}\` |`,
+                `| **Line** | \`${f.lineNumber}\` |`,
+                `| **CVSS Score** | \`${f.cvssScore}\` |`,
+                f.helpUri ? `| **Reference** | [Documentation](${f.helpUri}) |` : '',
+                ``,
+                `## Description`,
+                ``,
+                f.message,
+                ``,
+                `## Remediation`,
+                ``,
+                `Review the code at \`${f.filePath}:${f.lineNumber}\` and address the identified vulnerability.`,
+                f.helpUri ? `Refer to the [CodeQL documentation](${f.helpUri}) for guidance.` : '',
+                ``,
+                `---`,
+                `*This issue was automatically created by the [scheduled security scan](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/workflows/security-scan.yml).*`,
+                `*Scan date: ${scanDate}*`,
+              ].filter(l => l !== '').join('\n');
+
+              const result = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['security', 'codeql', 'bug'],
+              });
+              console.log(`Created issue #${result.data.number}: ${title}`);
+              created++;
+            }
+
+            console.log(`Done. Created ${created} new issue(s) for the top ${top5.length} CodeQL findings.`);
