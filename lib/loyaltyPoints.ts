@@ -20,13 +20,13 @@ const TIER_MULTIPLIERS: Record<string, number> = {
 }
 
 // Calculates points earned for a given order total
-export function calculatePoints(orderTotal: number, userTier: string): number {
+export function calculatePoints (orderTotal: number, userTier: string): number {
   const multiplier = TIER_MULTIPLIERS[userTier]
   return Math.floor(orderTotal * POINTS_PER_DOLLAR * multiplier)
 }
 
 // Returns the user's current tier based on their lifetime points
-export function getUserTier(lifetimePoints: number): string {
+export function getUserTier (lifetimePoints: number): string {
   let currentTier = 'Bronze'
   for (const tier of TIERS) {
     if (lifetimePoints >= TIER_THRESHOLDS[tier]) {
@@ -37,13 +37,13 @@ export function getUserTier(lifetimePoints: number): string {
 }
 
 // Applies a points redemption to an order total (100 points = $1 discount)
-export function applyPointsRedemption(orderTotal: number, pointsToRedeem: number): number {
+export function applyPointsRedemption (orderTotal: number, pointsToRedeem: number): number {
   const discount = pointsToRedeem / 100
   return orderTotal - discount
 }
 
 // Returns a summary of the user's loyalty status
-export function getLoyaltySummary(lifetimePoints: number, pendingPoints: number) {
+export function getLoyaltySummary (lifetimePoints: number, pendingPoints: number) {
   const tier = getUserTier(lifetimePoints)
   const nextTier = TIERS[TIERS.indexOf(tier) + 1]
   const pointsToNextTier = nextTier ? TIER_THRESHOLDS[nextTier] - lifetimePoints : null
